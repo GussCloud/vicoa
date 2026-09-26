@@ -88,7 +88,16 @@ import {
   machineSupportsWorktreeName,
   resolveWorktreeSpawn,
   type WorktreeMode,
+  type WorktreeSpawn,
 } from '@/lib/worktree-selection';
+import {
+  describeRepoError,
+  machineSupportsSessionRepos,
+  prepareSessionRepos,
+  sessionReposLabel,
+  type SessionRepoPick,
+} from '@/lib/session-repos';
+import { SessionReposDialog } from '@/components/dashboard/session-repos-dialog';
 import {
   canonicalPath,
   directoryChipLabel,
@@ -420,6 +429,11 @@ function NewSessionContent() {
   // one-shot (the next session would collide on it), so only the mode carries
   // over between visits.
   const [newWorktreeName, setNewWorktreeName] = useState('');
+  // Git picker: GitHub repositories (+ branch each) the daemon clones and
+  // checks out at submit. Non-empty replaces the folder + worktree choice.
+  const [repoPicks, setRepoPicks] = useState<SessionRepoPick[]>([]);
+  const [reposDialogOpen, setReposDialogOpen] = useState(false);
+  const [repoPrepareStatus, setRepoPrepareStatus] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
   // Chat history carried over by a fork, shown as a removable composer chip and
   // prepended to the first message on submit.
@@ -1501,7 +1515,11 @@ function NewSessionContent() {
       trackSubmitBlocked(blocked, machineStateRef.current);
       return;
     }
-    if (!api || !selectedMachineId || !directory.trim()) return;
+    if (!api || !selectedMachineId || (!directory.trim() && repoPicks.length === 0)) return;
+    if (repoPicks.length > 1 && sessionConfig.agent !== 'claude') {
+      setErrorMessage('Only Claude Code can work on several repositories. Pick one, or switch to Claude.');
+      return;
+    }
 
     // The picker greys out profiles an out-of-date machine can't carry, but the
     // machine can be switched *after* one is chosen. Refuse rather than spawn an
@@ -1562,6 +1580,39 @@ function NewSessionContent() {
       // `repo/apps/web`) carries into the worktree, so the checkout and the
       // folder stay orthogonal; the daemon's main path is the authority on
       // where the root is, a linked project folder the fallback.
+      let spawn: WorktreeSpawn;
+      let additionalDirectories: string[] = [];
+      if (repoPicks.length > 0) {
+        // Clone/fetch + per-session worktrees happen on the machine; a clone can
+        // take minutes, so this polls the daemon's job instead of one RPC.
+        try {
+          setRepoPrepareStatus('Preparing repositories...');
+          const prepared = await prepareSessionRepos(selectedMachineId, repoPicks, (job) => {
+            const current = job.repos.find((r) => r.state === 'running');
+            const done = job.repos.filter((r) => r.state === 'done').length;
+            setRepoPrepareStatus(
+              current
+                ? `Preparing ${current.full_name} (${done + 1}/${job.repos.length})...`
+                : 'Preparing repositories...',
+            );
+          });
+          spawn = { directory: prepared.directory, worktree: undefined };
+          additionalDirectories = prepared.additionalDirectories;
+        } catch (err) {
+          trackSessionCreateFailed('spawn_error');
+          setErrorMessage(
+            err instanceof RpcError
+              ? describeRepoError(err.code)
+              : err instanceof Error
+                ? err.message
+                : String(err),
+          );
+          setIsSubmitting(false);
+          return;
+        } finally {
+          setRepoPrepareStatus(null);
+        }
+      } else {
       const subpath =
         (repoListing?.mainPath
           ? relativeSubpath(directory.trim(), repoListing.mainPath, machine?.home_dir)
@@ -1569,13 +1620,14 @@ function NewSessionContent() {
         resolveProjectForDirectory(directory.trim(), selectedMachineId, projects, machine?.home_dir)
           ?.subpath ??
         '';
-      const spawn = resolveWorktreeSpawn({
+      spawn = resolveWorktreeSpawn({
         mode: worktreeMode,
         baseDirectory: directory.trim(),
         subpath,
         selectedWorktreePath,
         newWorktreeName,
       });
+      }
 
       const result = await getWsClient().callRpc(
         selectedMachineId,
@@ -1588,6 +1640,9 @@ function NewSessionContent() {
           // are deliberately never sent in `metadata`.
           ...(selectedProfileId ? { agent_profile_id: selectedProfileId } : {}),
           ...(spawn.worktree ? { worktree: spawn.worktree } : {}),
+          ...(additionalDirectories.length > 0
+            ? { additional_directories: additionalDirectories }
+            : {}),
         },
       );
       if (result.error) {
@@ -1744,7 +1799,7 @@ function NewSessionContent() {
       setErrorMessage(message);
       setIsSubmitting(false);
     }
-  }, [api, selectedMachineId, directory, sessionConfig, prompt, selectedTask, subtasks, pendingImages, pendingFolderRefs, forkContext, machines, isSubmitting, worktreeMode, selectedWorktreePath, newWorktreeName, repoListing, projects, selectedProfile, selectedProfileId, persistSelection, refreshData, router]);
+  }, [api, selectedMachineId, directory, sessionConfig, prompt, selectedTask, subtasks, pendingImages, pendingFolderRefs, forkContext, machines, isSubmitting, worktreeMode, selectedWorktreePath, newWorktreeName, repoListing, projects, selectedProfile, selectedProfileId, persistSelection, refreshData, router, repoPicks]);
 
   // Insert the highlighted command into the prompt (vs. the chat input, which
   // sends immediately — starting a session is heavier, so we let the user
@@ -1828,14 +1883,15 @@ function NewSessionContent() {
     if (!api) return 'no_api';
     if (machines.length === 0 || !selectedMachineId) return 'no_machine';
     if (!isOnline) return 'machine_offline';
-    if (!directory.trim()) return 'no_directory';
+    if (!directory.trim() && repoPicks.length === 0) return 'no_directory';
     return null;
   })();
   submitBlockedRef.current = submitBlockedReason;
   const blockedMessage = submitBlockedReason
     ? SUBMIT_BLOCKED_COPY[submitBlockedReason][isDesktop ? 'desktop' : 'web']
     : null;
-  const canSubmit = !isSubmitting && !!api && !!selectedMachineId && !!directory.trim() && isOnline;
+  const canSubmit =
+    !isSubmitting && !!api && !!selectedMachineId && (!!directory.trim() || repoPicks.length > 0) && isOnline;
 
   // Live plan usage (rate-limit windows) for the selected machine, fetched from
   // its daemon when the page opens — so limits are visible before committing
@@ -2104,6 +2160,12 @@ function NewSessionContent() {
               )}
             </div>
           )}
+          {repoPrepareStatus && (
+            <div className="mb-3 flex items-center gap-2 rounded-lg bg-muted px-3 py-2 font-mono text-sm text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {repoPrepareStatus}
+            </div>
+          )}
           {/* Setup chips: machine · working dir · worktree (when supported) */}
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
             <DropdownMenu>
@@ -2159,6 +2221,45 @@ function NewSessionContent() {
               </DropdownMenuContent>
             </DropdownMenu>
 
+            {currentMachine && machineSupportsSessionRepos(currentMachine) && (
+              <button
+                type="button"
+                title={
+                  repoPicks.length > 0
+                    ? repoPicks.map((p) => `${p.full_name}@${p.new_branch?.trim() || p.branch}`).join('\n')
+                    : 'Start on GitHub repositories'
+                }
+                className={SETUP_CHIP_CLASS}
+                disabled={!api || !isOnline}
+                onClick={() => setReposDialogOpen(true)}
+              >
+                <GitBranch className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+                <span className={`max-w-44 truncate ${repoPicks.length > 0 ? '' : 'text-muted-foreground/60'}`}>
+                  {sessionReposLabel(repoPicks)}
+                </span>
+                {repoPicks.length > 0 && (
+                  <X
+                    className="h-3 w-3 flex-shrink-0 text-muted-foreground hover:text-foreground"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRepoPicks([]);
+                    }}
+                  />
+                )}
+              </button>
+            )}
+            {currentMachine && machineSupportsSessionRepos(currentMachine) && (
+              <SessionReposDialog
+                open={reposDialogOpen}
+                onOpenChange={setReposDialogOpen}
+                machineId={selectedMachineId}
+                value={repoPicks}
+                onChange={setRepoPicks}
+                allowMultiple={sessionConfig.agent === 'claude'}
+              />
+            )}
+
+            {repoPicks.length === 0 && (
             <DirectoryPickerPopover
               value={directory}
               onChange={setDirectory}
@@ -2182,8 +2283,9 @@ function NewSessionContent() {
                 </span>
               </button>
             </DirectoryPickerPopover>
+            )}
 
-            {currentMachine && machineSupportsWorktree(currentMachine) && isGitRepo !== false && (
+            {repoPicks.length === 0 && currentMachine && machineSupportsWorktree(currentMachine) && isGitRepo !== false && (
               <WorktreePickerPopover
                 machineId={selectedMachineId}
                 cwd={directory}

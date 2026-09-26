@@ -407,6 +407,7 @@ class HeadlessClaudeRunner:
         system_prompt: Optional[str] = None,
         debug: bool = False,
         is_resuming: bool = False,
+        add_dirs: Optional[List[str]] = None,
     ):
         self.vicoa_api_key = vicoa_api_key
         self.vicoa_base_url = vicoa_base_url
@@ -431,6 +432,9 @@ class HeadlessClaudeRunner:
         self.allowed_tools = allowed_tools
         self.disallowed_tools = disallowed_tools
         self.extra_args = extra_args
+        # Extra repositories the session may read and edit besides `cwd`
+        # (the new-session Git picker). Handed to the CLI as `--add-dir`.
+        self.add_dirs = list(add_dirs or [])
         self.debug = debug
 
         setup_logging(session_id, console_output=console_output, debug=debug)
@@ -735,6 +739,10 @@ class HeadlessClaudeRunner:
         )
         if self.model:
             options_kwargs["model"] = self.model
+        # getattr: tests build runners via __new__ without __init__.
+        add_dirs = getattr(self, "add_dirs", None)
+        if add_dirs:
+            options_kwargs["add_dirs"] = add_dirs
         if effort_for_options is not None:
             options_kwargs["effort"] = effort_for_options
         return ClaudeAgentOptions(**options_kwargs)
@@ -1057,6 +1065,8 @@ class HeadlessClaudeRunner:
             "model": self.model,
             "thinking_effort": self.thinking_effort,
             "permission_mode": self.permission_mode,
+            # Kept so a resume relaunches with the same extra repositories.
+            "additional_directories": getattr(self, "add_dirs", None) or None,
         }
         return {k: v for k, v in sc.items() if v is not None}
 
@@ -3759,6 +3769,13 @@ def main():
         "other value enables adaptive thinking and takes precedence over "
         "--enable-thinking when both are passed (plan §3.6 dual-write).",
     )
+    parser.add_argument(
+        "--add-dir",
+        dest="add_dirs",
+        action="append",
+        default=None,
+        help="Additional directory Claude may access (repeatable)",
+    )
     # Honor VICOA_DEBUG=1/true/yes/on as a fallback so daemon-spawned
     # sessions can be flipped to debug without rebuilding the spawn-request
     # metadata — just export the env var and restart the daemon.
@@ -3834,6 +3851,7 @@ def main():
         system_prompt=args.system_prompt,
         debug=args.debug,
         is_resuming=bool(resume_session_id),
+        add_dirs=args.add_dirs,
     )
 
     logger.info("Starting headless Claude Code session...")

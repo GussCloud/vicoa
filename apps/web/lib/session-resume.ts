@@ -295,6 +295,13 @@ export async function resumeSession(
   // Carry the stored model / effort / permission mode through the resume so the
   // relaunched session isn't silently reset to the daemon's defaults.
   const metadata = resumeSpawnMetadata(instance);
+  // Extra repositories the session was started with (Git picker); relaunching
+  // without them would silently shrink what the agent can reach.
+  const additionalDirectories = Array.isArray(instance.session_config?.additional_directories)
+    ? (instance.session_config.additional_directories as unknown[]).filter(
+        (d): d is string => typeof d === 'string' && d.length > 0,
+      )
+    : [];
   const result = await getWsClient().callRpc(instance.machine_id, 'spawn-session', {
     directory: expandProjectPath(instance.project, instance.home_dir),
     agent: resumeAgentSlug(instance),
@@ -303,6 +310,9 @@ export async function resumeSession(
       agent_session_id: handle,
     },
     ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+    ...(additionalDirectories.length > 0
+      ? { additional_directories: additionalDirectories }
+      : {}),
   });
 
   if (result.error) {

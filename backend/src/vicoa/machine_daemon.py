@@ -817,6 +817,10 @@ class MachineDaemon:
         clients keep using that name for Claude and simply don't ask about
         the others, rather than paying the router's `no_handler` grace window.
 
+        `session-repos` means the new-session Git picker works here: the
+        `github-repo-list` / `github-branch-list` / `repo-prepare` RPCs exist and
+        `spawn-session` honours `additional_directories` (Claude only).
+
         `system-prompt` tells the client this daemon forwards the spawn-metadata
         `system_prompt` to the agent, so an agent profile carrying custom
         instructions can be offered for this machine. This one matters more than
@@ -839,6 +843,7 @@ class MachineDaemon:
             "skill-manage",
             "open-in",
             "provider-usage",
+            "session-repos",
             SYSTEM_PROMPT_CAPABILITY,
         ]
 
@@ -1154,6 +1159,7 @@ class MachineDaemon:
         metadata: dict[str, Any] | None = None,
         is_resuming: bool = False,
         agent_session_id: str | None = None,
+        add_dirs: list[str] | None = None,
     ) -> list[str]:
         cmd = self._build_headless_command_base(
             directory=directory,
@@ -1169,6 +1175,11 @@ class MachineDaemon:
         system_prompt = self._extract_system_prompt(metadata)
         if system_prompt:
             cmd.extend(["--system-prompt", system_prompt])
+        # Only the Claude wrapper takes `--add-dir`; the other agents see just
+        # the primary directory (the app hides the Git picker for them).
+        if add_dirs and self._normalize_agent(agent) == "claude":
+            for extra_dir in add_dirs:
+                cmd.extend(["--add-dir", extra_dir])
         if is_resuming:
             cmd.extend(
                 self._resume_args(
@@ -2157,6 +2168,21 @@ class MachineDaemon:
             from vicoa.rpc import github_ops
 
             return github_ops.github_pr_list(**(frame.get("params") or {}))
+        if method in {
+            "github-repo-list",
+            "github-branch-list",
+            "repo-prepare",
+            "repo-prepare-status",
+        }:
+            from vicoa.rpc import repo_ops
+
+            handler = {
+                "github-repo-list": repo_ops.github_repo_list,
+                "github-branch-list": repo_ops.github_branch_list,
+                "repo-prepare": repo_ops.repo_prepare_start,
+                "repo-prepare-status": repo_ops.repo_prepare_status,
+            }[method]
+            return handler(**(frame.get("params") or {}))
         if method == "git-worktree-list":
             from vicoa.rpc import worktree_ops
 
@@ -2287,6 +2313,10 @@ class MachineDaemon:
             "git-unstage",
             "git-commit",
             "github-pr-list",
+            "github-repo-list",
+            "github-branch-list",
+            "repo-prepare",
+            "repo-prepare-status",
             "git-worktree-list",
             "git-worktree-check-name",
             "git-worktree-remove",
@@ -2435,6 +2465,32 @@ class MachineDaemon:
             # not worth failing the scan over.
             logger.warning("failed to publish available_agents", exc_info=True)
 
+    # More than this is almost certainly a client bug; each one is a separate
+    # tree the agent indexes.
+    _MAX_ADDITIONAL_DIRECTORIES = 10
+
+    def _parse_additional_directories(self, raw: Any) -> list[str]:
+        """Validate `spawn-session`'s `additional_directories` param.
+
+        Each entry must be an existing directory; `~` is expanded and the path
+        resolved so the agent gets the same absolute path the app shows.
+        Raises ValueError (a clean RPC error) on anything else.
+        """
+        if raw is None:
+            return []
+        if not isinstance(raw, list) or not all(isinstance(d, str) for d in raw):
+            raise ValueError("additional_directories must be a list of paths")
+        if len(raw) > self._MAX_ADDITIONAL_DIRECTORIES:
+            raise ValueError("Too many additional directories")
+        resolved: list[str] = []
+        for entry in raw:
+            path = os.path.realpath(os.path.expanduser(entry.strip()))
+            if not entry.strip() or not os.path.isdir(path):
+                raise ValueError(f"Additional directory not found: {entry}")
+            if path not in resolved:
+                resolved.append(path)
+        return resolved
+
     def spawn_session_rpc(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Handle a `spawn-session` RPC: launch a headless agent, return its id.
 
@@ -2535,6 +2591,9 @@ class MachineDaemon:
             else:
                 expanded_directory = os.path.expanduser(directory.strip())
             os.makedirs(expanded_directory, exist_ok=True)
+            add_dirs = self._parse_additional_directories(
+                params.get("additional_directories")
+            )
 
             install_error = self._check_agent_installation(normalized_agent)
             if install_error:
@@ -2558,6 +2617,7 @@ class MachineDaemon:
                 metadata=metadata,
                 is_resuming=resume_instance_id is not None,
                 agent_session_id=resume_agent_session_id,
+                add_dirs=add_dirs,
             )
             self.send_heartbeat()
             # Detach the session's stdio from the daemon's. Without this the
