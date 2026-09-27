@@ -129,6 +129,10 @@ interface FilesGitPanelProps {
    * the tree and history most likely changed (the agent edited, committed…),
    * so the visible Files/Changes surface refreshes itself on that edge. */
   agentWorking?: boolean;
+  /** Every repository the session works in (primary first). With more than
+   * one, a row above the panel switches which one `cwd` points at. */
+  roots?: string[];
+  onRootChange?: (root: string) => void;
 }
 
 function basename(path: string): string {
@@ -175,7 +179,7 @@ function envExportPrefix(env: Record<string, string>): string {
   return `export ${pairs.map(([k, v]) => `${k}=${shSingleQuote(v)}`).join(' ')} && `;
 }
 
-export function FilesGitPanel({ machineId, cwd, homeDir, instanceId, panel, overlay, canMaximize, pendingAction, openFileRequest, agentWorking }: FilesGitPanelProps) {
+export function FilesGitPanel({ machineId, cwd, homeDir, instanceId, panel, overlay, canMaximize, pendingAction, openFileRequest, agentWorking, roots, onRootChange }: FilesGitPanelProps) {
   // `desktop` is present exactly when the Electron preload injected a desktop
   // config. Safe to read directly — this component never server-renders
   // (panel.open starts false until the hydration effect runs).
@@ -1970,6 +1974,24 @@ export function FilesGitPanel({ machineId, cwd, homeDir, instanceId, panel, over
         {headerRight}
       </div>
       {panel.splitTop && dock}
+      {roots && roots.length > 1 && onRootChange && (
+        <div className="flex items-center gap-2 border-b border-border px-2 py-1 flex-shrink-0 font-mono text-xs">
+          <span className="text-muted-foreground">Repo</span>
+          <select
+            value={cwd ?? ''}
+            onChange={(e) => onRootChange(e.target.value)}
+            className="h-6 min-w-0 flex-1 cursor-pointer truncate rounded border border-border bg-background px-1 text-xs"
+            title={cwd ?? ''}
+          >
+            {roots.map((root, i) => (
+              <option key={root} value={root}>
+                {basename(root.replace(/\/+$/, '')) || root}
+                {i === 0 ? ' (session)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {contextRow}
       {body}
       {!panel.splitTop && dock}

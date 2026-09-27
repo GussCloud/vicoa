@@ -7,7 +7,13 @@ import { AgentTypeIcon } from '@/components/dashboard/agent-type-icon';
 import { PrincipalAvatar } from '@/components/ui/principal-avatar';
 import { agentPrincipal, useAgentProfiles } from '@/lib/use-agent-profiles';
 import { Button } from '@/components/ui/button';
-import { X, ArrowDown, Pin, Loader2, Menu, PanelLeft, Folder, FolderPlus, MessageCircle, FileCode, Share } from 'lucide-react';
+import { X, ArrowDown, Pin, Loader2, Menu, PanelLeft, Folder, FolderPlus, MessageCircle, FileCode, Share, ChevronDown, Check } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { useDesktopChrome } from '@/components/dashboard/desktop-chrome-context';
 import { DRAG_REGION, NO_DRAG } from '@/lib/app-region';
 import { attachSelectionDragFix } from '@/lib/selection-drag-fix';
@@ -210,6 +216,22 @@ function AgentInstanceContent() {
     () => (storeEntry?.instance ? { ...storeEntry.instance, messages: storeEntry.messages } : null),
     [storeEntry],
   );
+  // Every repository the session works in: its cwd, plus the extra ones it was
+  // started with from the Git picker (`--add-dir`). The header folder chip and
+  // the files/git panel follow whichever one is selected.
+  const additionalDirsKey = JSON.stringify(instance?.session_config?.additional_directories ?? null);
+  const sessionRoots = useMemo<string[]>(() => {
+    if (!instance?.project) return [];
+    const extra: unknown = JSON.parse(additionalDirsKey);
+    const dirs = Array.isArray(extra)
+      ? extra.filter((d): d is string => typeof d === 'string' && d.length > 0)
+      : [];
+    return [instance.project, ...dirs.filter((d) => d !== instance.project)];
+  }, [instance?.project, additionalDirsKey]);
+  const [activeRoot, setActiveRoot] = useState<string | null>(null);
+  useEffect(() => setActiveRoot(null), [instanceId]);
+  const viewRoot =
+    activeRoot && sessionRoots.includes(activeRoot) ? activeRoot : (instance?.project ?? null);
   const sessionAgentProfile = instance?.agent_profile_id
     ? (agentProfilesById.get(instance.agent_profile_id) ?? null)
     : null;
@@ -2275,7 +2297,41 @@ function AgentInstanceContent() {
             {instance.project && (
               <>
                 <span className="text-muted-foreground flex-shrink-0">·</span>
-                {/* Folder chip: basename only, full path in the tooltip. */}
+                {/* Folder chip: basename only, full path in the tooltip. With
+                    several repositories it switches which one the header branch
+                    and the files/git panel show. */}
+                {sessionRoots.length > 1 ? (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        style={NO_DRAG}
+                        className="flex min-w-0 max-w-[24vw] cursor-pointer items-center gap-1 rounded px-1 font-mono text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                        title={viewRoot ?? ''}
+                      >
+                        <Folder className="h-3.5 w-3.5 flex-shrink-0" />
+                        <span className="truncate">{rootLabel(viewRoot ?? instance.project)}</span>
+                        <span className="flex-shrink-0 text-xs">+{sessionRoots.length - 1}</span>
+                        <ChevronDown className="h-3 w-3 flex-shrink-0" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="font-mono">
+                      {sessionRoots.map((root, i) => (
+                        <DropdownMenuItem
+                          key={root}
+                          onClick={() => setActiveRoot(root)}
+                          className="flex cursor-pointer items-center gap-2 text-xs"
+                          title={root}
+                        >
+                          <Folder className="h-3.5 w-3.5 flex-shrink-0" />
+                          <span className="flex-1 truncate">{rootLabel(root)}</span>
+                          {i === 0 && <span className="text-muted-foreground">session</span>}
+                          {root === viewRoot && <Check className="h-3.5 w-3.5" />}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="flex min-w-0 max-w-[16vw] cursor-default items-center gap-1 font-mono text-sm text-muted-foreground">
@@ -2289,7 +2345,8 @@ function AgentInstanceContent() {
                     <p>{instance.project}</p>
                   </TooltipContent>
                 </Tooltip>
-                <GitBranchBadge machineId={instance.machine_id ?? null} cwd={instance.project} />
+                )}
+                <GitBranchBadge machineId={instance.machine_id ?? null} cwd={viewRoot ?? instance.project} />
                 {/* Focus-mode peek toggle: sits right after the branch (or after
                     the project path when there's no branch, since the badge
                     renders nothing then). Only shown while focused; hold ` for a
@@ -2612,7 +2669,9 @@ function AgentInstanceContent() {
           >
             <FilesGitPanel
               machineId={instance?.machine_id ?? null}
-              cwd={instance?.project ?? null}
+              cwd={viewRoot}
+              roots={sessionRoots}
+              onRootChange={setActiveRoot}
               homeDir={instance?.home_dir ?? null}
               instanceId={instanceId}
               panel={panel}
@@ -2761,7 +2820,9 @@ function AgentInstanceContent() {
       {panel.open && !fileOverlay && (
         <FilesGitPanel
           machineId={instance?.machine_id ?? null}
-          cwd={instance?.project ?? null}
+          cwd={viewRoot}
+          roots={sessionRoots}
+          onRootChange={setActiveRoot}
           homeDir={instance?.home_dir ?? null}
           instanceId={instanceId}
           panel={panel}
@@ -2857,4 +2918,9 @@ const VIRTUOSO_COMPONENTS = {
 
 export default function AgentInstancePage() {
   return <AgentInstanceContent />;
+}
+
+/** Folder basename for a repo path, for the header chip. */
+function rootLabel(path: string): string {
+  return path.replace(/\/+$/, '').split('/').pop() || path;
 }
